@@ -16,8 +16,8 @@ library(tidymodels)
 library(themis)
 
 data_path <- '../input/playground-series-s4e10/'
-train <- read_csv(file.path(data_path, "train.csv")) |> 
-  mutate(loan_status=as.factor(loan_status))
+train <- read_csv(file.path(data_path, "train.csv")) #|> 
+  #mutate(loan_status=as.factor(loan_status))
 test <- read_csv(file.path(data_path, "test.csv")) 
 sample_submission <- read_csv(file.path(data_path, "sample_submission.csv")) 
 ```
@@ -44,8 +44,8 @@ test_data <- testing(split)
 rcp_baseline <-
   recipe(loan_status ~ ., data = train_data) |>
   update_role(id, new_role='ID', )|>
-  #step_mutate(loan_status=as.factor(loan_status),skip=T)|>
-  step_log(all_numeric_predictors(),offset = 1, skip = TRUE) |>
+  step_mutate(loan_status=as.factor(loan_status),skip=T)|>
+  step_log(all_numeric_predictors(),offset = 1, skip = FALSE) |>
   step_normalize(all_numeric_predictors()) |>
   step_dummy(all_nominal_predictors()) |>
   step_unknown(all_nominal_predictors()) |>
@@ -101,22 +101,22 @@ boost_tree_lgbm_spec <-
 
 ## fit
 ```{r}
-fit <- 
+glm_fit <-
   workflow() |>
   add_recipe(loan_recipe_upsampled) |>
-  add_model(model)
-
-fit <- workflow %>% fit(data = train_data)
+  add_model(model)|>
+  fit(data = train_data)
 
 simple_glm_probs <-
-  predict(fit, test_data, type = "prob") %>%
-  bind_cols(test_data)
+  predict(glm_fit, test_data, type = "prob") %>%
+  bind_cols(test_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
+  #bind_cols(test_data)
 
 simple_glm_roc <- 
   simple_glm_probs %>% 
-  roc_curve(loan_status, .pred_1)
+  roc_curve(loan_status, .pred_0)
 
-simple_glm_probs %>% roc_auc(loan_status, .pred_1)
+simple_glm_probs %>% roc_auc(loan_status, .pred_0)
 
 
 autoplot(simple_glm_roc )
@@ -133,13 +133,13 @@ lgbm_fit <-
 
 lgbm_fit_probs <-
   predict(lgbm_fit, test_data, type = "prob") %>%
-  bind_cols(test_data)
+  bind_cols(test_data|>mutate(loan_status=factor(loan_status)))
 
 lgbm_fit_roc <- 
   lgbm_fit_probs %>% 
-  roc_curve(loan_status, .pred_1)
+  roc_curve(loan_status, .pred_0)
 
-lgbm_fit_probs %>% roc_auc(loan_status, .pred_1)
+lgbm_fit_probs %>% roc_auc(loan_status, .pred_0)
 
 
 autoplot(lgbm_fit_roc )
