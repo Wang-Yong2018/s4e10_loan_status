@@ -149,10 +149,11 @@ autoplot(lgbm_fit_roc )
 # predict
 
 ```{r}
-test_predictions <- predict(fit, test, type = "prob")
+best_fit <- lgbm_fit
+test_predictions <- predict(best_fit, test, type = "class")
 
 submission <- sample_submission %>%
-mutate(failure = test_predictions$.pred_1)
+mutate(loan_status = test_predictions$.pred_class)
 
 write_csv(submission, "submission.csv")
 ```
