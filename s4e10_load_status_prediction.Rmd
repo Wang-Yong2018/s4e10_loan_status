@@ -16,10 +16,10 @@ library(tidymodels)
 library(themis)
 
 data_path <- '../input/playground-series-s4e10/'
-train <- read_csv(file.path(data_path, "train.csv")) |> 
+train <- read_csv(file.path(data_path, "train.csv"),show_col_types=F) |> 
   mutate(loan_status=as.factor(loan_status)) 
-test <- read_csv(file.path(data_path, "test.csv")) 
-sample_submission <- read_csv(file.path(data_path, "sample_submission.csv")) 
+test <- read_csv(file.path(data_path, "test.csv"),show_col_types=F) 
+sample_submission <- read_csv(file.path(data_path, "sample_submission.csv"),show_col_types = FALSE) 
 ```
 # EDA
 ## quick skim
@@ -40,6 +40,8 @@ test_data <- testing(split)
 ```
 
 # feature engineering 
+## recipes
+### baseline
 ```{r}
 rcp_baseline <-
   recipe(loan_status ~ ., data = train_data) |>
@@ -53,20 +55,83 @@ rcp_baseline <-
   step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> # Scale numeric predictors
+  step_upsample(loan_status, over_ratio = 1)|>
   check_missing(all_predictors())
 
 rcp_baseline |>prep()|>juice() |>glimpse()
 ```
 
-## resampling (upsampling -example)
+### v1 bad - baseline + age + income + loan_amnt
+first plot eda for age, income and loan_amnt
 ```{r}
-# Use `themis` package for resampling
-library(themis)
-# Option 1: Upsampling (simplest)
-loan_recipe_upsampled <- 
-  rcp_baseline |>
-  step_upsample(loan_status, over_ratio = 1)
+train |>
+  select(person_age, person_income, loan_amnt) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  ggplot(aes(x = value)) +
+  geom_density() +
+  theme_minimal()+
+  facet_wrap(~variable,ncol = 1, scales = "free")
 ```
+
+```{r}
+rcp_bs_v1 <-
+  recipe(loan_status ~ ., data = train_data) |>
+  update_role(id, new_role='ID', )|>
+  step_mutate(loan_status=as.factor(loan_status),skip=T)|>
+    # Step 1: Handle Outliers in person_age (Winsorizing)
+  step_mutate(person_age = ifelse(person_age > 80, 80,person_age) ) %>% #Winsorizing step
+  # Step 2: Log transformation for Income and Loan Amount
+  #step_log(person_income, base = 10) %>%  #Use the log transformation
+  #step_log(loan_amnt, base = 10) %>% #Use the log transformation
+  step_log(all_numeric_predictors(),base=10,offset = 1, skip = FALSE) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_unknown(all_nominal_predictors()) |>
+  step_impute_median(all_numeric_predictors())|> 
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> # Scale numeric predictors
+  step_upsample(loan_status, over_ratio = 1)|>
+  check_missing(all_predictors())
+
+rcp_bs_v1 |>prep()|>juice() |>glimpse()
+```
+### v2 baseline + interative fe
+```{r}
+rcp_bs_v2 <-
+  recipe(loan_status ~ ., data = train_data) |>
+  update_role(id, new_role='ID', )|>
+  step_mutate(loan_status=as.factor(loan_status),skip=T)|>
+  step_mutate(interest_rate = loan_amnt * loan_int_rate,
+              #: Total interest paid might be insightful.
+              debt_rate = loan_amnt / person_income , 
+              #: Debt-to-income ratio (a variation).
+              age_emp_rate = person_age * person_emp_length
+              #: Experience can be a factor in loan repayment.
+  )|>
+  step_log(all_numeric_predictors(),offset = 1, skip = FALSE) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_unknown(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_impute_median(all_numeric_predictors())|>
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> # Scale numeric predictors
+  step_upsample(loan_status, over_ratio = 1)|>
+  check_missing(all_predictors())
+
+rcp_bs_v2 |>prep()|>juice() |>glimpse()
+```
+
+
+### selected_recipes
+```{r}
+selected_list <- 
+  list(baseline = rcp_baseline,
+       #bs_v1 = rcp_bs_v1,
+       bs_v2 = rcp_bs_v2)
+```
+
 
 # modeling 
 ## model engine setup
@@ -75,99 +140,142 @@ loan_recipe_upsampled <-
 library(bonsai)
 library(lightgbm)
 
-
-model <- 
+glm_model <- 
   logistic_reg() |>
   set_engine("glm", family = "binomial")|>
   set_mode('classification')
 
-boost_tree_lgbm_spec <- 
+lgbm_model <- 
   boost_tree(
-    trees = 500,
-   tree_depth = 5,
-   learn_rate =  0.001,
-   min_n = 85,
-   loss_reduction = 0
+   #  trees = 500,
+   # tree_depth = 5,
+   # learn_rate =  0.001,
+   # min_n = 85,
+   # loss_reduction = 0
   ) %>% 
   set_engine(engine = "lightgbm",
              is_unbalance = TRUE,
-             num_leaves = 713,
-             num_threads = 12
+             # num_leaves = 713,
+             # num_threads = 12
        #      boosting = "goss"   # this may slow the system
              ) %>%
   set_mode(mode = "classification") 
 
 ```
 
+
+
 ## fit
+### glm
 ```{r}
-glm_fit <-
+glm_fit_list <-
+  selected_list |>
+  map(\(x) workflow() |>
+           add_model(glm_model)|>
+           add_recipe(x)|>
+           fit(train_data))
+
+glm_fit_result <-
+  glm_fit_list |>
+  map(\(x) predict(x, train_data, type='prob')|>
+           bind_cols(train_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
+      )
+glm_fit_result |> 
+  map_dfr(\(x) x|>
+           roc_auc(loan_status, .pred_0,event_level = 'first'),
+          .id='model_name')
+
+
+glm_roc_curve <-
+  glm_fit_result|> 
+  map(\(x) x|>
+           roc_curve(loan_status, .pred_0,event_level = 'first')
+          )
+  
+glm_roc_curve |> map(\(x) 
+                        autoplot(x))
+```
+
+### lightgbm
+```{r}
+lgbm_fit_list <-
+  selected_list |>
+  map(\(x) workflow() |>
+           add_model(lgbm_model)|>
+           add_recipe(x)|>
+           fit(train_data))
+
+lgbm_fit_result <-
+  lgbm_fit_list |>
+  map(\(x) predict(x, train_data, type='prob')|>
+           bind_cols(train_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
+      )
+
+lgbm_fit_result |> 
+  map_dfr(\(x) x|>
+           roc_auc(loan_status, .pred_0,event_level = 'first'),
+          .id='model_name')
+
+lgbm_roc_curve <-
+  lgbm_fit_result|> 
+  map(\(x) x|>
+           roc_curve(loan_status, .pred_0,event_level = 'first')
+          )
+  
+lgbm_roc_curve |> 
+  map(\(x)  autoplot(x))
+```
+#### validate
+
+```{r}
+lgbm_fit_result <-
+  lgbm_fit_list |>
+  map(\(x) predict(x, test_data, type='prob')|>
+           bind_cols(test_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
+      )
+
+lgbm_fit_result |> 
+  map_dfr(\(x) x|>
+           roc_auc(loan_status, .pred_0,event_level = 'first'),
+          .id='model_name')
+
+lgbm_roc_curve <-
+  lgbm_fit_result|> 
+  map(\(x) x|>
+           roc_curve(loan_status, .pred_0,event_level = 'first')
+          )
+  
+lgbm_roc_curve |> 
+  map(\(x)  autoplot(x))
+  
+
+```
+# final_model
+```{r}
+final_fit <- 
   workflow() |>
-  add_recipe(loan_recipe_upsampled) |>
-  add_model(model)|>
-  fit(data = train_data)
+  add_model(lgbm_model)|>
+  add_recipe(rcp_bs_v2)|>
+  fit(train)
 
-simple_glm_probs <-
-  predict(glm_fit, test_data, type = "prob") %>%
-  bind_cols(test_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
-  #bind_cols(test_data)
+final_result <- final_fit |> predict( train, type='prob')|>
+           bind_cols(train|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
 
-simple_glm_pred <-
-  predict(glm_fit, test_data) %>%
-  bind_cols(test_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
-  #bind_cols(test_data)
+final_result |> 
+           roc_auc(loan_status, .pred_0,event_level = 'first')
 
-simple_glm_roc <- 
-  simple_glm_probs %>% 
-  roc_curve(loan_status, .pred_0,event_level = 'first')
-
-simple_glm_probs %>% roc_auc(loan_status, .pred_0,event_level = 'first)
-
-
-autoplot(simple_glm_roc )
-
-```
-## lightgbm
-```{r}
-lgbm_fit <- 
-  workflow(loan_recipe_upsampled,
-           boost_tree_lgbm_spec)|>
-  fit(train_data)
-
-  combined_train_result <-
-    bind_cols(
-    train_data,
-    predict(lgbm_fit,new_data = train_data),
-    predict(lgbm_fit,new_data = train_data,type='prob'))
+final_roc_curve <-
+  final_result|> 
+           roc_curve(loan_status, .pred_0,event_level = 'first')
   
-  combined_train_result |>
-    select(id, loan_status,.pred_class,.pred_0,.pred_1)|>
-  yardstick::roc_auc(loan_status, .pred_0,event_level = 'first')
-  
-
-```
-
-
-```{r}
-lgbm_fit_probs <-
-  predict(lgbm_fit, test_data, type = "prob") %>%
-  bind_cols(test_data|>mutate(loan_status=factor(loan_status)))
-
-lgbm_fit_roc <- 
-  lgbm_fit_probs %>% 
-  roc_curve(loan_status, .pred_0)
-
-lgbm_fit_probs %>% roc_auc(loan_status, .pred_0)
-
-
-autoplot(lgbm_fit_roc )
+final_roc_curve |> autoplot(x)
 
 ```
 
 # predict
 
 ```{r}
-best_fit <- lgbm_fit
+best_fit <- final_fit
 test_predictions <- predict(best_fit, test, type = "class")
 
 submission <- sample_submission %>%
