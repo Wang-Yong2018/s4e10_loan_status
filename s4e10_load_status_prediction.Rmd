@@ -122,6 +122,25 @@ rcp_bs_v2 <-
 
 rcp_bs_v2 |>prep()|>juice() |>glimpse()
 ```
+### v3 baseline + smote
+```{r}
+rcp_bs_v3 <-
+  recipe(loan_status ~ ., data = train_data) |>
+  update_role(id, new_role='ID', )|>
+  step_mutate(loan_status=as.factor(loan_status),skip=T)|>
+  step_log(all_numeric_predictors(),offset = 1, skip = FALSE) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_unknown(all_nominal_predictors()) |>
+  step_impute_median(all_numeric_predictors())|> 
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> # Scale numeric predictors
+  step_smote(loan_status, over_ratio = 1)|>
+  check_missing(all_predictors())
+
+rcp_bs_v3 |>prep()|>juice() |>glimpse()
+```
 
 
 ### selected_recipes
@@ -129,7 +148,8 @@ rcp_bs_v2 |>prep()|>juice() |>glimpse()
 selected_list <- 
   list(baseline = rcp_baseline,
        #bs_v1 = rcp_bs_v1,
-       bs_v2 = rcp_bs_v2)
+       bs_v2 = rcp_bs_v2,
+       bs_v3 = rcp_bs_v3)
 ```
 
 
