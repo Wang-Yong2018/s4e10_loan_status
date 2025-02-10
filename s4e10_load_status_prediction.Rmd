@@ -14,7 +14,7 @@ library(tidyverse)
 library(tidymodels)
 #library( ParBayesOptimization)
 library(themis)
-
+competition_name <- 'playground-series-s4e10'
 data_path <- '../input/playground-series-s4e10/'
 train <- read_csv(file.path(data_path, "train.csv"),show_col_types=F) |> 
   mutate(loan_status=as.factor(loan_status)) 
@@ -147,16 +147,17 @@ glm_model <-
 
 lgbm_model <- 
   boost_tree(
-   #  trees = 500,
-   # tree_depth = 5,
-   # learn_rate =  0.001,
+   trees = 500,
+   tree_depth = 10,
+   learn_rate =  0.01,
    # min_n = 85,
-   # loss_reduction = 0
+   loss_reduction = 0.001
   ) %>% 
   set_engine(engine = "lightgbm",
              is_unbalance = TRUE,
              # num_leaves = 713,
              # num_threads = 12
+             verbose=1
        #      boosting = "goss"   # this may slow the system
              ) %>%
   set_mode(mode = "classification") 
@@ -282,5 +283,14 @@ submission <- sample_submission %>%
 mutate(loan_status = test_predictions$.pred_class)
 
 write_csv(submission, "submission.csv")
+```
+
+# submit to kaggle
+```{r}
+# submit latest submission.csv
+system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "tbd"')
+sleep(5)
+# get latest score 
+system('kaggle competitions  submissions -q -c playground-series-s4e10')
 ```
 
