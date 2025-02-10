@@ -168,8 +168,8 @@ glm_model <-
 lgbm_model <- 
   boost_tree(
    trees = 500,
-   tree_depth = 10,
-   learn_rate =  0.01,
+   tree_depth = 7,
+   learn_rate =  0.1,
    # min_n = 85,
    loss_reduction = 0.001
   ) %>% 
@@ -216,7 +216,31 @@ glm_roc_curve <-
 glm_roc_curve |> map(\(x) 
                         autoplot(x))
 ```
+#### validate
 
+```{r}
+glm_fit_result <-
+  glm_fit_list |>
+  map(\(x) predict(x, test_data, type='prob')|>
+           bind_cols(test_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
+      )
+
+glm_fit_result |> 
+  map_dfr(\(x) x|>
+           roc_auc(loan_status, .pred_0,event_level = 'first'),
+          .id='model_name')
+
+glm_roc_curve <-
+  glm_fit_result|> 
+  map(\(x) x|>
+           roc_curve(loan_status, .pred_0,event_level = 'first')
+          )
+  
+glm_roc_curve |> 
+  map(\(x)  autoplot(x))
+  
+
+```
 ### lightgbm
 ```{r}
 lgbm_fit_list <-
@@ -275,8 +299,8 @@ lgbm_roc_curve |>
 ```{r}
 final_fit <- 
   workflow() |>
-  add_model(lgbm_model)|>
-  add_recipe(rcp_bs_v2)|>
+  add_model(glm_model)|>
+  add_recipe(rcp_baseline)|>
   fit(train)
 
 final_result <- final_fit |> predict( train, type='prob')|>
@@ -308,8 +332,8 @@ write_csv(submission, "submission.csv")
 # submit to kaggle
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "tbd"')
-sleep(5)
+system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "glm logistic local 0.90"')
+Sys.sleep(5)
 # get latest score 
 system('kaggle competitions  submissions -q -c playground-series-s4e10')
 ```
