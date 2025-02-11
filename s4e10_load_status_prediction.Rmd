@@ -37,6 +37,8 @@ split <- initial_split(train, prop = 0.8, strata = loan_status)
 train_data <- training(split)
 test_data <- testing(split)
 
+cv_folds <- vfold_cv(train_data, v = 10, strata = loan_status)
+
 ```
 
 # feature engineering 
@@ -70,7 +72,7 @@ train |>
   ggplot(aes(x = value)) +
   geom_density() +
   theme_minimal()+
-  facet_wrap(~variable,ncol = 1, scales = "free")
+  facet_wrap(~variable, ncol = 3, scales = "free")
 ```
 
 ```{r}
@@ -175,6 +177,7 @@ lgbm_model <-
   ) %>% 
   set_engine(engine = "lightgbm",
              is_unbalance = TRUE,
+             metric='auc',
              # num_leaves = 713,
              # num_threads = 12
              verbose=1
@@ -293,15 +296,55 @@ lgbm_roc_curve <-
 lgbm_roc_curve |> 
   map(\(x)  autoplot(x))
   
-
 ```
+## workflowsets
+```{r}
+library(workflowsets)
+# all_metrics 定义了要计算的评估指标 (准确率, 精确率, 召回率, F1-score, AUC)
+
+
+race_results <- 
+  workflows <-
+  workflow_set(
+    preproc = selected_list,
+    models = list(glm = glm_model, lgbm = lgbm_model)
+  )|>
+  workflow_map(
+    "fit_resamples", #快速对比模型方案
+    resamples = cv_folds,
+    metrics = metric_set(accuracy, precision, recall, f_meas, roc_auc), #roc_auc需要classProbs=TRUE
+    verbose = TRUE )
+
+print(race_results|>collect_metrics()) #展示模型结果
+
+best_workflow_id <- race_results %>%
+  rank_results() %>%                                       # 按指定指标排序
+  filter(.metric == "roc_auc") %>%
+  select(wflow_id, .metric, mean , rank) %>% #展示指定的模型
+  filter(rank==1) %>%
+  pull(wflow_id)
+
+# 11. 获取选择最佳模型对应的工作流
+best_workflow <- workflows %>%
+  extract_workflow(best_workflow_id)
+# 12. 把最佳模型应用到测试数据集,评估泛化能力
+final_results <- last_fit(best_workflow,
+                         split =split,
+                         )
+
+# 13.输出测试集上的泛化性能
+collect_metrics(final_results)
+```
+```{r}
+# best_param <- select_best(tune_results, metric) # or other `select_*()`
+#  wflow <- finalize_workflow(wflow, best_param)  # or just `finalize_model()`
+#  wflow_fit <- fit(wflow, data_set)
+final_model <- best_workflow|>fit(train)
+```
+
 # final_model
 ```{r}
-final_fit <- 
-  workflow() |>
-  add_model(glm_model)|>
-  add_recipe(rcp_baseline)|>
-  fit(train)
+final_fit <-final_model
 
 final_result <- final_fit |> predict( train, type='prob')|>
            bind_cols(train|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
@@ -335,6 +378,6 @@ write_csv(submission, "submission.csv")
 system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "glm logistic local 0.90"')
 Sys.sleep(5)
 # get latest score 
-system('kaggle competitions  submissions -q -c playground-series-s4e10')
+system('kaggle competitions submissions -q -c playground-series-s4e10')
 ```
 
