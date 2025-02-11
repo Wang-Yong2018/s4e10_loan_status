@@ -31,7 +31,7 @@ skimr::skim(test)
 
 # split the data 
 ```{r}
-set.seed(42)
+set.seed(1353)
 
 split <- initial_split(train, prop = 0.8, strata = loan_status)
 train_data <- training(split)
@@ -172,19 +172,24 @@ lgbm_model <-
    trees = 500,
    tree_depth = 7,
    learn_rate =  0.1,
-   # min_n = 85,
+   min_n = 80,
    loss_reduction = 0.001
   ) %>% 
   set_engine(engine = "lightgbm",
              is_unbalance = TRUE,
              metric='auc',
-             # num_leaves = 713,
-             # num_threads = 12
+             num_leaves = 80,
+             num_threads = 12,
              verbose=1
        #      boosting = "goss"   # this may slow the system
              ) %>%
   set_mode(mode = "classification") 
 
+roc_metrics <- metric_set(accuracy, precision, recall, f_meas, roc_auc)
+
+ctrl <- control_resamples(save_pred = TRUE,
+                          verbose=TRUE,
+                          allow_par= TRUE)
 ```
 
 
@@ -197,27 +202,13 @@ glm_fit_list <-
   map(\(x) workflow() |>
            add_model(glm_model)|>
            add_recipe(x)|>
-           fit(train_data))
+           fit_resamples(cv_folds, control = ctrl, metrics = roc_metrics))
 
-glm_fit_result <-
+fit_result_df <- 
   glm_fit_list |>
-  map(\(x) predict(x, train_data, type='prob')|>
-           bind_cols(train_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
-      )
-glm_fit_result |> 
-  map_dfr(\(x) x|>
-           roc_auc(loan_status, .pred_0,event_level = 'first'),
-          .id='model_name')
+  map_dfr(\(x) collect_metrics(x),.id = 'wflow_id')
 
 
-glm_roc_curve <-
-  glm_fit_result|> 
-  map(\(x) x|>
-           roc_curve(loan_status, .pred_0,event_level = 'first')
-          )
-  
-glm_roc_curve |> map(\(x) 
-                        autoplot(x))
 ```
 #### validate
 
@@ -251,27 +242,12 @@ lgbm_fit_list <-
   map(\(x) workflow() |>
            add_model(lgbm_model)|>
            add_recipe(x)|>
-           fit(train_data))
+           fit_resamples(cv_folds, control = ctrl, metrics = roc_metrics))
 
-lgbm_fit_result <-
+fit_result_df <- 
   lgbm_fit_list |>
-  map(\(x) predict(x, train_data, type='prob')|>
-           bind_cols(train_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
-      )
-
-lgbm_fit_result |> 
-  map_dfr(\(x) x|>
-           roc_auc(loan_status, .pred_0,event_level = 'first'),
-          .id='model_name')
-
-lgbm_roc_curve <-
-  lgbm_fit_result|> 
-  map(\(x) x|>
-           roc_curve(loan_status, .pred_0,event_level = 'first')
-          )
-  
-lgbm_roc_curve |> 
-  map(\(x)  autoplot(x))
+  map_dfr(\(x) collect_metrics(x),.id = 'wflow_id')
+fit_result_df|>filter(.metric=='roc_auc')
 ```
 #### validate
 
@@ -379,5 +355,22 @@ system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv 
 Sys.sleep(5)
 # get latest score 
 system('kaggle competitions submissions -q -c playground-series-s4e10')
+```
+
+# combined eda
+```{r}
+#| fig.height: 24
+#| fig.width: 6 
+
+combined_df <- bind_rows(list('train'=train,'test'=test),.id ='source' )
+combined_df |>glimpse( )
+num_fe <- combined_df|>select(where(is.numeric)) |>select(-id)|>names()
+text_fe <-combined_df|>select(where(is.character))|>select(-source)|>names()
+combined_df |>
+  pivot_longer(cols=num_fe)|>
+  ggplot(aes(x= log1p(value),fill=source))+
+  geom_density(alpha=0.5)+
+  facet_wrap(~name,ncol = 1,scales = 'free')
+
 ```
 
