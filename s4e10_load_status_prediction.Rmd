@@ -107,7 +107,26 @@ get_var_compare <- function(rcp,is_debug=F){
 
 
 ```
+### vrose - baseline 
+```{r}
+rcp_bs_rose <-
+  recipe(loan_status ~ ., data = train_data) |>
+  update_role(id, new_role='ID', )|>
+  step_mutate(loan_status=as.factor(loan_status),skip=T)|>
+  
+  step_impute_median(all_numeric_predictors())|> 
+  step_log(all_numeric_predictors(),offset = 1, skip = FALSE) |>
+  
+  step_unknown(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> # Scale numeric predictors
+  step_rose(loan_status,over_ratio = 1,skip=TRUE)|>
+  check_missing(all_predictors())
 
+rcp_bs_rose |> get_var_compare()
+```
 
 ### v1 bad - baseline + age + income + loan_amnt
 first plot eda for age, income and loan_amnt
@@ -139,7 +158,7 @@ rcp_bs_v1 <-
   step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> # Scale numeric predictors
-  step_upsample(loan_status, over_ratio = 1)|>
+  step_rose(loan_status, over_ratio = 1)|>
   check_missing(all_predictors())
 
 get_var_compare(rcp_bs_v1)
@@ -165,7 +184,7 @@ rcp_bs_v2 <-
   step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> # Scale numeric predictors
-  step_upsample(loan_status, over_ratio = 1)|>
+  step_rose(loan_status, over_ratio = 1,skip = TRUE)|>
   check_missing(all_predictors())
 
 
@@ -185,7 +204,7 @@ rcp_bs_v3 <-
   step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> # Scale numeric predictors
-  step_smote(loan_status, over_ratio = 1)|>
+  step_rose(loan_status, over_ratio = 1,skip = TRUE)|>
   check_missing(all_predictors())
 
 rcp_bs_v3 |>get_var_compare()
@@ -210,7 +229,7 @@ rcp_bs_v4 <-
   step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> # Scale numeric predictors
-  step_upsample(loan_status, over_ratio = 1)|>
+  step_rose(loan_status, over_ratio = 1,skip=TRUE)|>
   check_missing(all_predictors())
 
 rcp_bs_v4 |>get_var_compare()
@@ -241,7 +260,7 @@ rcp_bs_v5 <-
   step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> # Scale numeric predictors
-  step_upsample(loan_status, over_ratio = 1)|>
+  step_rose(loan_status, over_ratio = 1,skip=TRUE)|>
   check_missing(all_predictors())
 
 rcp_bs_v5 |>get_var_compare()
@@ -250,7 +269,8 @@ rcp_bs_v5 |>get_var_compare()
 ```{r}
 selected_list <- 
   list(baseline = rcp_baseline,
-      
+       bs_rose = rcp_bs_rose,
+       bs_v3 = rcp_bs_v3,
        bs_v4 = rcp_bs_v4,
        bs_v5 = rcp_bs_v5
        )
@@ -272,7 +292,7 @@ glm_model <-
 lgbm_model <- 
   boost_tree(
     trees = 500,
-    tree_depth = 7,
+    tree_depth = 6,
     learn_rate =  0.1,
     min_n = 100,
     loss_reduction = 0.001,
@@ -281,7 +301,7 @@ lgbm_model <-
   set_engine(engine = "lightgbm",
              is_unbalance = TRUE,
              metric='auc',
-             num_leaves = 70,
+             num_leaves = 30,
              num_threads = 12,
              verbose=1
              #      boosting = "goss"   # this may slow the system
@@ -303,10 +323,9 @@ ctrl <- control_resamples(save_pred = TRUE,
 ### glm
 ```{r}
 library(future)
-plan(multisession,workers = 4)
+plan(multisession,workers = 8)
 
 # Now run fit_resamples()`...
-
 glm_fit_list <-
   selected_list |>
   map(\(x) workflow() |>
@@ -337,11 +356,11 @@ tune_glm_grid <- grid_regular(penalty(range = c(-4, 1)),  # penalty 的搜索范
 
 # 训练并调参
 library(future)
-plan(multisession,workers = 4)
+plan(multisession,workers = 8)
 
 tune_glm_wflow <- 
   workflow() %>%
-  add_recipe(rcp_baseline) %>%
+  add_recipe(rcp_bs_v5) %>%
   add_model(tune_glm_model)
   
 tune_glm_results <- 
@@ -354,12 +373,12 @@ plan(sequential)
 print(tune_glm_results|>collect_metrics()|>arrange(desc(mean)))
 
 best_glm_params <- tune_glm_results %>%
-  select_best("roc_auc") #  选择 AUC 最高的参数组合
+  select_best(metric="roc_auc") #  选择 AUC 最高的参数组合
 
 
 # 选择最佳参数
 best_logistic_params <- 
-  tune_glm_results %>%
+  tune_glm_results |>
   select_best(metric="roc_auc") #  选择 AUC 最高的参数组合
 # 使用最佳参数更新 Workflow
 final_logistic_workflow <- 
@@ -375,7 +394,7 @@ final_logistic_fit <- final_logistic_workflow %>%
 ### lightgbm
 ```{r}
 library(future)
-plan(multisession,workers = 4)
+plan(multisession,workers = 8)
 
 lgbm_fit_list <-
   selected_list |>
@@ -390,30 +409,7 @@ fit_result_df <-
 plan(sequential)
 fit_result_df|>filter(.metric=='roc_auc')
 ```
-#### validate
 
-```{r}
-lgbm_fit_result <-
-  lgbm_fit_list |>
-  map(\(x) predict(x, test_data, type='prob')|>
-           bind_cols(test_data|>mutate(loan_status=factor(loan_status, levels = c(0, 1))))
-      )
-
-lgbm_fit_result |> 
-  map_dfr(\(x) x|>
-           roc_auc(loan_status, .pred_0,event_level = 'first'),
-          .id='model_name')
-
-lgbm_roc_curve <-
-  lgbm_fit_result|> 
-  map(\(x) x|>
-           roc_curve(loan_status, .pred_0,event_level = 'first')
-          )
-  
-lgbm_roc_curve |> 
-  map(\(x)  autoplot(x))
-  
-```
 #### tune
 ```{r}
 # 3. LightGBM Model Specification
@@ -438,7 +434,7 @@ tune_lgbm_workflow <- workflow() %>%
 tune_lgbm_grid <- 
   tune_lgbm_workflow %>% 
   extract_parameter_set_dials() %>%
-  update(trees=trees(c(100L,500L)),
+  update(trees=trees(c(300L,500L)),
          min_n=min_n(c(30,100)),
          learn_rate=learn_rate(c(-2,-1)),
          #sample_size=sample_size(c(0.7,0.9))
@@ -452,8 +448,12 @@ tune_lgbm_grid <-
 #  Use tune_grid to find the best hyperparameter combo
 #  Control the number of cpus if you only want to use x -1 cpus
 #  If this is too much running locally, you decrease size from the tuning grid and repeats from the resampling strategy
+
+library(future)
+plan(multisession,workers = 8)
+
 lgbm_tune_results <- 
-  tune_lgbm_lgbm_workflow %>%
+  tune_lgbm_workflow %>%
   tune_grid(
     resamples = cv_folds,
     grid = tune_lgbm_grid,
@@ -463,14 +463,15 @@ lgbm_tune_results <-
                            allow_par = TRUE) # Keep predictions
   )
 
+plan(sequential)
 # 8. Explore Tuning Results
 # Show the best results:
 lgbm_tune_results %>%
-  show_best("roc_auc")
+  collect_metrics()
 
 # Select the best model based on ROC AUC
 best_lgbm_params <- lgbm_tune_results %>%
-  select_best("roc_auc")
+  select_best(metric="roc_auc")
 
 # Plotting Tune Results
 
@@ -483,37 +484,22 @@ plot
 
 # 9. Finalize Workflow
 # Apply the best hyperparameter values to the workflow
-final_lgbm_workflow <- lgbm_workflow %>%
+final_lgbm_workflow <- tune_lgbm_workflow %>%
   finalize_workflow(best_lgbm_params) # Putting the best model into the workflow
 
 # 10. Train Final Model
 # Train the final LightGBM model on the entire training dataset
 final_lgbm_model <- final_lgbm_workflow %>%
-  fit(data = your_train_data)
+  fit(data = train)
 
 # 11. Feature Importance
 #  Visualize Feature importance
+library(vip)
 final_lgbm_model %>%
-  pull_workflow_fit() %>%
+  extract_fit_parsnip() %>%
   vip(num_features = 20, aesthetics = list(fill = "darkgreen", alpha = 0.8))  # Plot top 20
 
-# 12. Predictions
-#  Generate predictions for the test set
 
-#  Option 1: Prediction as a Class
-predictions_class <- predict(final_lgbm_model, new_data = your_test_data, type = "class")
-
-#  Option 2: Prediction as a Probability
-predictions_prob <- predict(final_lgbm_model, new_data = your_test_data, type = "prob")
-
-#  Combine Results on the Test Data (optional)
-lgbm_results <- your_test_data %>%
-  bind_cols(predictions_class)  %>% #  For Classes
-  bind_cols(predictions_prob)     #  For Probabilities
-
-#  Optionally save the submission file in a format for uploading
-
-write_csv(lgbm_results, file = "lgbm_predictions.csv")
 ```
 
 ## workflowsets
@@ -587,7 +573,7 @@ final_roc_curve |> autoplot(x)
 # predict
 
 ```{r}
-best_fit <- final_fit
+best_fit <-final_lgbm_model
 test_predictions <- predict(best_fit, test, type = "class")
 
 submission <- sample_submission %>%
@@ -599,7 +585,7 @@ write_csv(submission, "submission.csv")
 # submit to kaggle
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "glm logistic local 0.90"')
+system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "lgbm tune local score 0.95"')
 Sys.sleep(5)
 # get latest score 
 system('kaggle competitions submissions -q -c playground-series-s4e10')
@@ -671,3 +657,41 @@ collect_metrics(results_adv)
 ```
  AS the combined_df train & test roc_auc is almost equal to 0.50, there is no significant difference between train & test data distribution
  
+## stacking 
+```{r}
+
+# 定义控制参数
+ctrl_grid <- control_stack_grid()  # 使用control_stack()设置控制参数
+
+# 定义基模型
+model_spec_glm <- logistic_reg() %>% set_engine("glm")%>% set_mode("classification")
+model_spec_rf <- rand_forest() %>% set_engine("ranger") %>% set_mode("classification")
+model_spec_xgb <- boost_tree() %>% set_engine("xgboost") %>% set_mode("classification")
+model_spec_lgb <- boost_tree() %>% set_engine("lightgbm") %>% set_mode("classification")
+
+library(future)
+plan(multisession,workers = 8)
+
+# 训练基模型
+base_models <- 
+  workflow_set(preproc = list(rcp_bs_rose),  # 使用相同的预处理流程
+                            models = list(glm = model_spec_glm,
+                                          rf = model_spec_rf, 
+                                          xgb = model_spec_xgb,
+                                          lgb=model_spec_lgb)
+                            ) |>
+  option_add( control = control_stack_grid(),
+              metrics = metric_set(roc_auc) )|>
+  workflow_map(resamples =cv_folds,
+               verbose = TRUE)
+# 初始化堆叠
+stack_model <- stacks() %>%
+  add_candidates(base_models)
+
+# 拟合元模型
+stack_fit <- stack_model %>%
+  blend_predictions() %>%  # 选择最优基模型组合
+  fit_members()  # 训练元模型
+plan(sequential)
+```
+
