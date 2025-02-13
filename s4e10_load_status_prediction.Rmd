@@ -266,6 +266,18 @@ rcp_bs_v5 <-
 
 rcp_bs_v5 |>get_var_compare()
 ```
+
+### v6 kaggle simple rcp
+```{r}
+rcp_kaggle <- recipe(loan_status ~ ., data = train_data) |>
+  step_rm(all_of(c('id','person_age'))) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_integer(all_nominal_predictors()) 
+
+
+
+```
+
 ### selected_recipes
 ```{r}
 selected_list <- 
@@ -273,7 +285,8 @@ selected_list <-
        bs_rose = rcp_bs_rose,
        bs_v3 = rcp_bs_v3,
        bs_v4 = rcp_bs_v4,
-       bs_v5 = rcp_bs_v5
+       bs_v5 = rcp_bs_v5,
+       kaggle = rcp_kaggle
        )
 ```
 
@@ -416,18 +429,18 @@ fit_result_df|>filter(.metric=='roc_auc')
 # 3. LightGBM Model Specification
 tune_lgbm_model <- boost_tree( trees = tune(),               # Number of trees - tune() means we'll optimize
                                tree_depth = tune(),          # Max tree depth - important for regularization
-                               learn_rate = tune(),          # Learning rate - shrinkage, reduce overfit
-                               loss_reduction = 0.01,      # Min loss reduction - regularization
-                               #sample_size = tune(),         # Bagging fraction (rows)
+                               learn_rate = 0.05,          # Learning rate - shrinkage, reduce overfit
+                               #loss_reduction = 0.01,      # Min loss reduction - regularization
+                               sample_size = tune(),         # Bagging fraction (rows)
                                #mtry = tune(),                # Colsample_bytree -  Feature subsampling
-                               min_n = tune()                # Min. terminal node size - regularization
+                               #min_n = tune()                # Min. terminal node size - regularization
                                ) %>%
   set_engine("lightgbm") %>%
   set_mode("classification")    # IMPORTANT:  Classification! (or "regression")
 
 # 4. Workflow Creation
 tune_lgbm_workflow <- workflow() %>%
-  add_recipe(rcp_bs_v5) %>%
+  add_recipe(rcp_kaggle) %>%
   add_model(tune_lgbm_model)
 
 # 5. Tuning Grid Definition
@@ -499,6 +512,40 @@ library(vip)
 final_lgbm_model %>%
   extract_fit_parsnip() %>%
   vip(num_features = 20, aesthetics = list(fill = "darkgreen", alpha = 0.8))  # Plot top 20
+
+
+```
+### xgboost
+```{r}
+
+mod <- boost_tree(learn_rate = 0.05,
+                  trees = tune(),
+                  tree_depth = tune(), 
+                  sample_size = tune()) |> 
+  set_engine(engine = "xgboost", 
+             lambda = 0.15,
+             nthread = parallel::detectCores()) |>
+  set_mode(mode = "classification")
+
+wflow <- workflow(rcp_kaggle, mod)
+
+ctrl <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+grid <- grid_random(trees(range = c(1000, 2000)),
+                    tree_depth(range = c(4, 6)), 
+                    sample_prop(range = c(0.6, 0.8)),
+                    size = 30)
+tune_res <- tune_grid(wflow, 
+                      resamples = cv_folds,
+                      grid = grid,
+                      control = ctrl,
+                      metrics = metric_set(roc_auc))
+
+tune_res %>% 
+  collect_metrics() %>% 
+  ggplot(aes(x = sample_size, y = mean, color = as_factor(tree_depth))) + 
+  geom_point() + 
+  labs(x = "Sample_size", y = "AUC", color = "Tree depth") +
+  theme_bw()
 
 
 ```
@@ -586,7 +633,7 @@ write_csv(submission, "submission.csv")
 # submit to kaggle
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "stack 0.92 (only lgmb)"')
+system('kaggle competitions submit -c playground-series-s4e10 -f tidy_loaner.csv -m "0.96 tidy_loaner.csv"')
 Sys.sleep(5)
 # get latest score 
 system('kaggle competitions submissions -q -c playground-series-s4e10')
