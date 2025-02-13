@@ -51,7 +51,7 @@ cv_folds <- vfold_cv(train_data, v = 10, strata = loan_status)
 ```{r}
 rcp_baseline <-
   recipe(loan_status ~ ., data = train_data) |>
-  update_role(id, new_role='ID', )|>
+  update_role(id, new_role='ID')|>
   step_mutate(loan_status=as.factor(loan_status),skip=T)|>
   
   step_impute_median(all_numeric_predictors())|> 
@@ -112,6 +112,7 @@ get_var_compare <- function(rcp,is_debug=F){
 rcp_bs_rose <-
   recipe(loan_status ~ ., data = train_data) |>
   update_role(id, new_role='ID', )|>
+  step_rm(id,skip=TRUE)|>
   step_mutate(loan_status=as.factor(loan_status),skip=T)|>
   
   step_impute_median(all_numeric_predictors())|> 
@@ -573,7 +574,7 @@ final_roc_curve |> autoplot(x)
 # predict
 
 ```{r}
-best_fit <-final_lgbm_model
+best_fit <-stack_fit
 test_predictions <- predict(best_fit, test, type = "class")
 
 submission <- sample_submission %>%
@@ -585,7 +586,7 @@ write_csv(submission, "submission.csv")
 # submit to kaggle
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "lgbm tune local score 0.95"')
+system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "stack 0.92 (only lgmb)"')
 Sys.sleep(5)
 # get latest score 
 system('kaggle competitions submissions -q -c playground-series-s4e10')
@@ -659,12 +660,12 @@ collect_metrics(results_adv)
  
 ## stacking 
 ```{r}
-
+library(stacks)
 # 定义控制参数
 ctrl_grid <- control_stack_grid()  # 使用control_stack()设置控制参数
 
 # 定义基模型
-model_spec_glm <- logistic_reg() %>% set_engine("glm")%>% set_mode("classification")
+model_spec_glm <- logistic_reg() %>% set_engine("glm",family = "binomial")%>% set_mode("classification")
 model_spec_rf <- rand_forest() %>% set_engine("ranger") %>% set_mode("classification")
 model_spec_xgb <- boost_tree() %>% set_engine("xgboost") %>% set_mode("classification")
 model_spec_lgb <- boost_tree() %>% set_engine("lightgbm") %>% set_mode("classification")
@@ -673,25 +674,49 @@ library(future)
 plan(multisession,workers = 8)
 
 # 训练基模型
-base_models <- 
-  workflow_set(preproc = list(rcp_bs_rose),  # 使用相同的预处理流程
+wf_set <- 
+  workflow_set(preproc = list(rcp_bs_v5),  # 使用相同的预处理流程
                             models = list(glm = model_spec_glm,
                                           rf = model_spec_rf, 
                                           xgb = model_spec_xgb,
                                           lgb=model_spec_lgb)
-                            ) |>
+                            ) 
+
+wf_set_trained  <- 
+  wf_set |>
   option_add( control = control_stack_grid(),
               metrics = metric_set(roc_auc) )|>
-  workflow_map(resamples =cv_folds,
-               verbose = TRUE)
+  workflow_map( fn="tune_grid",
+                resamples =cv_folds,
+                verbose = TRUE)
+
+
+
+
 # 初始化堆叠
 stack_model <- stacks() %>%
-  add_candidates(base_models)
+  add_candidates(wf_set_trained)
 
 # 拟合元模型
 stack_fit <- stack_model %>%
   blend_predictions() %>%  # 选择最优基模型组合
   fit_members()  # 训练元模型
 plan(sequential)
+```
+
+
+```{r}
+autoplot(stack_fit)
+autoplot(stack_fit, type = "weights")
+
+collect_parameters(stack_fit,'recipe_lgb')
+
+stack_preds <- 
+  test_data %>%
+  select(loan_status) %>%
+  bind_cols(predict(stack_fit, test_data, class='prob', members = TRUE))
+
+stack_preds|>accuracy(truth=loan_status,.pred_class)
+
 ```
 
