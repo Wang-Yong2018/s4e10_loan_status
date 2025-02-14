@@ -36,12 +36,12 @@ skimr::skim(test)
 # split the data 
 ```{r}
 
-
-split <- initial_split(train, prop = 0.8, strata = loan_status)
+set.seed(1234)
+split <- initial_split(train, prop = 0.85, strata = loan_status)
 train_data <- training(split)
 test_data <- testing(split)
 
-cv_folds <- vfold_cv(train_data, v = 10, strata = loan_status)
+cv_folds <- vfold_cv(train_data, v = 5, strata = loan_status)
 
 ```
 
@@ -269,6 +269,8 @@ rcp_bs_v5 |>get_var_compare()
 
 ### v6 kaggle simple rcp
 ```{r}
+cats <- c("person_home_ownership", "loan_intent", "loan_grade", "cb_person_default_on_file")
+drop <- c("id", "person_age")
 rcp_kaggle <- recipe(loan_status ~ ., data = train_data) |>
   step_rm(all_of(c('id','person_age'))) |> 
   step_normalize(all_numeric_predictors()) |> 
@@ -290,6 +292,9 @@ selected_list <-
        )
 ```
 
+```{r}
+rcp_kaggle |> prep()|>juice()|>summarize(sum(loan_amnt),sum(person_income))
+```
 
 # modeling 
 ## model engine setup
@@ -528,8 +533,8 @@ mod <- boost_tree(learn_rate = 0.05,
   set_mode(mode = "classification")
 
 wflow <- workflow(rcp_kaggle, mod)
-
-ctrl <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+set.seed(1234)
+ctrl <- control_resamples(save_pred = TRUE, save_workflow = TRUE,verbose=TRUE)
 grid <- grid_random(trees(range = c(1000, 2000)),
                     tree_depth(range = c(4, 6)), 
                     sample_prop(range = c(0.6, 0.8)),
@@ -549,6 +554,33 @@ tune_res %>%
 
 
 ```
+```{r}
+best_xgb_params <- 
+  tune_res |> select_best(metric='roc_auc') 
+
+
+final_xgb_workflow <-
+  wflow|>
+  finalize_workflow(best_xgb_params)
+  # Putting the best model into the workflow
+
+# 10. Train Final Model
+# Train the final LightGBM model on the entire training dataset
+final_xgb_fit <- last_fit(final_xgb_workflow, split)
+```
+
+#### last_fit
+```{r}
+final_xgb_fit <- last_fit(final_xgb_workflow, split)
+collect_metrics(final_xgb_fit)
+
+final_xgb_mod <- extract_workflow(final_xgb_fit)
+
+final_xgb_mod |> 
+  extract_fit_parsnip() |> 
+  vip() + theme_bw()
+```
+
 
 ## workflowsets
 ```{r}
@@ -588,6 +620,8 @@ final_results <- last_fit(best_workflow,
 # 13.输出测试集上的泛化性能
 collect_metrics(final_results)
 ```
+
+
 ```{r}
 # best_param <- select_best(tune_results, metric) # or other `select_*()`
 #  wflow <- finalize_workflow(wflow, best_param)  # or just `finalize_model()`
@@ -621,7 +655,7 @@ final_roc_curve |> autoplot(x)
 # predict
 
 ```{r}
-best_fit <-stack_fit
+best_fit <- final_xgb_mod
 test_predictions <- predict(best_fit, test, type = "class")
 
 submission <- sample_submission %>%
@@ -629,11 +663,15 @@ mutate(loan_status = test_predictions$.pred_class)
 
 write_csv(submission, "submission.csv")
 ```
+```{r}
+
+write_csv(submission, "submission_rstudio.csv")
+```
 
 # submit to kaggle
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s4e10 -f tidy_loaner.csv -m "0.96 tidy_loaner.csv"')
+system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "0.96 xgb kaggle with last_fit in rstudio"')
 Sys.sleep(5)
 # get latest score 
 system('kaggle competitions submissions -q -c playground-series-s4e10')
