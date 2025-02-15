@@ -436,11 +436,12 @@ tune_lgbm_model <- boost_tree( trees = tune(),               # Number of trees -
                                tree_depth = tune(),          # Max tree depth - important for regularization
                                learn_rate = 0.05,          # Learning rate - shrinkage, reduce overfit
                                #loss_reduction = 0.01,      # Min loss reduction - regularization
-                               sample_size = tune(),         # Bagging fraction (rows)
+                               sample_size = 0.8,         # Bagging fraction (rows)
                                #mtry = tune(),                # Colsample_bytree -  Feature subsampling
                                #min_n = tune()                # Min. terminal node size - regularization
                                ) %>%
-  set_engine("lightgbm") %>%
+  set_engine("lightgbm",
+             ) %>%
   set_mode("classification")    # IMPORTANT:  Classification! (or "regression")
 
 # 4. Workflow Creation
@@ -449,16 +450,21 @@ tune_lgbm_workflow <- workflow() %>%
   add_model(tune_lgbm_model)
 
 # 5. Tuning Grid Definition
+tune_lgbm_grid <- grid_random(trees(range=c(500,1500)),
+                              tree_depth(range=c(4,10)),
+                              #sample_size(range = c(0.5, 1.0)),
+                              size=20)
+print(tune_lgbm_grid)
 # Revised Tuning Grid Definition
-tune_lgbm_grid <- 
-  tune_lgbm_workflow %>% 
-  extract_parameter_set_dials() %>%
-  update(trees=trees(c(300L,500L)),
-         min_n=min_n(c(30,100)),
-         learn_rate=learn_rate(c(-2,-1)),
-         #sample_size=sample_size(c(0.7,0.9))
-         )|>
-    grid_space_filling(size = 10)
+# tune_lgbm_grid <- 
+#   tune_lgbm_workflow %>% 
+#   extract_parameter_set_dials() %>%
+#   update(trees=trees(c(300L,500L)),
+#          min_n=min_n(c(30,100)),
+#          learn_rate=learn_rate(c(-2,-1)),
+#          #sample_size=sample_size(c(0.7,0.9))
+#          )|>
+#     grid_space_filling(size = 10)
   
 # 6. Resampling Strategy
 # Using 5-fold cross-validation, repeated 3 times for more robust results.
@@ -503,18 +509,23 @@ plot
 
 # 9. Finalize Workflow
 # Apply the best hyperparameter values to the workflow
-final_lgbm_workflow <- tune_lgbm_workflow %>%
+final_lgbm_workflow <-
+  tune_lgbm_workflow %>%
   finalize_workflow(best_lgbm_params) # Putting the best model into the workflow
 
 # 10. Train Final Model
 # Train the final LightGBM model on the entire training dataset
-final_lgbm_model <- final_lgbm_workflow %>%
-  fit(data = train)
+final_lgbm_fit <- 
+  final_lgbm_workflow %>%
+  last_fit( split)
+
+final_lgbm_mod <- extract_workflow(final_lgbm_fit)
+
 
 # 11. Feature Importance
 #  Visualize Feature importance
 library(vip)
-final_lgbm_model %>%
+final_lgbm_mod %>%
   extract_fit_parsnip() %>%
   vip(num_features = 20, aesthetics = list(fill = "darkgreen", alpha = 0.8))  # Plot top 20
 
@@ -522,7 +533,6 @@ final_lgbm_model %>%
 ```
 ### xgboost
 ```{r}
-
 mod <- boost_tree(learn_rate = 0.05,
                   trees = tune(),
                   tree_depth = tune(), 
@@ -533,17 +543,29 @@ mod <- boost_tree(learn_rate = 0.05,
   set_mode(mode = "classification")
 
 wflow <- workflow(rcp_kaggle, mod)
+
+```
+
+```{r}
 set.seed(1234)
 ctrl <- control_resamples(save_pred = TRUE, save_workflow = TRUE,verbose=TRUE)
+
 grid <- grid_random(trees(range = c(1000, 2000)),
                     tree_depth(range = c(4, 6)), 
                     sample_prop(range = c(0.6, 0.8)),
                     size = 30)
+```
+
+
+```{r}
+set.seed(1234)
 tune_res <- tune_grid(wflow, 
                       resamples = cv_folds,
                       grid = grid,
                       control = ctrl,
                       metrics = metric_set(roc_auc))
+best_xgb_params <- 
+  tune_res |> select_best(metric='roc_auc') 
 
 tune_res %>% 
   collect_metrics() %>% 
@@ -555,10 +577,8 @@ tune_res %>%
 
 ```
 ```{r}
-best_xgb_params <- 
-  tune_res |> select_best(metric='roc_auc') 
 
-
+set.seed(1234)
 final_xgb_workflow <-
   wflow|>
   finalize_workflow(best_xgb_params)
@@ -567,18 +587,20 @@ final_xgb_workflow <-
 # 10. Train Final Model
 # Train the final LightGBM model on the entire training dataset
 final_xgb_fit <- last_fit(final_xgb_workflow, split)
+collect_metrics(final_xgb_fit)
+
 ```
 
 #### last_fit
 ```{r}
-final_xgb_fit <- last_fit(final_xgb_workflow, split)
-collect_metrics(final_xgb_fit)
+library(vip)
+
 
 final_xgb_mod <- extract_workflow(final_xgb_fit)
 
-final_xgb_mod |> 
-  extract_fit_parsnip() |> 
-  vip() + theme_bw()
+# final_xgb_mod |> 
+#   extract_fit_parsnip() |> 
+#   vip() + theme_bw()
 ```
 
 
@@ -655,24 +677,20 @@ final_roc_curve |> autoplot(x)
 # predict
 
 ```{r}
-best_fit <- final_xgb_mod
-test_predictions <- predict(best_fit, test, type = "class")
+best_fit <- final_lgbm_mod
+test_predictions <- predict(best_fit, test, type = "prob")
 
 submission <- sample_submission %>%
-mutate(loan_status = test_predictions$.pred_class)
+mutate(loan_status = test_predictions$.pred_1)
 
 write_csv(submission, "submission.csv")
-```
-```{r}
-
-write_csv(submission, "submission_rstudio.csv")
 ```
 
 # submit to kaggle
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m "0.96 xgb kaggle with last_fit in rstudio"')
-Sys.sleep(5)
+system('kaggle competitions submit -c playground-series-s4e10 -f submission.csv -m ".pred_1 prob it should be 0.95"')
+Sys.sleep(15)
 # get latest score 
 system('kaggle competitions submissions -q -c playground-series-s4e10')
 ```
